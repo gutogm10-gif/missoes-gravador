@@ -3,31 +3,30 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>Gravador - Missões da Lara e do Gael</title>
+<title>Gravador - Miss&#245;es da Lara e do Gael</title>
 <style>
-  body{font-family:'Segoe UI',Verdana,Arial,sans-serif; background:#FDFBF7; color:#22303C; margin:0; padding:20px; text-align:center;}
-  h1{font-size:1.2rem; color:#1B5E75;}
-  .figura{font-size:4rem; margin:16px 0 4px;}
-  .rotulo{font-size:1.4rem; font-weight:700; color:#1B5E75; margin-bottom:16px;}
-  button{font-size:1.1rem; font-weight:700; padding:20px; border-radius:16px; border:none; width:100%; max-width:320px; margin:10px auto; display:block; cursor:pointer;}
-  #btnGravar{background:#8E5FB0; color:#fff;}
-  #btnGravar.gravando{background:#D64545;}
-  #btnEnviar{background:#3FA76A; color:#fff;}
-  #status{color:#8A97A0; font-size:.95rem; min-height:1.4em;}
-  #transcricao{background:#EAF3F8; border-radius:12px; padding:12px; margin-top:14px; font-size:1rem; min-height:1.4em;}
-  audio{width:100%; max-width:320px; margin-top:14px;}
-  .aviso{background:#FDECEC; border:2px solid #D64545; color:#7A1F1F; padding:10px; border-radius:10px; font-size:.85rem; margin-top:14px;}
+body{font-family:'Segoe UI',Verdana,Arial,sans-serif; background:#FDFBF7; color:#22303C; margin:0; padding:20px; text-align:center;}
+h1{font-size:1.2rem; color:#1B5E75;}
+.figura{font-size:4rem; margin:16px 0 4px;}
+.rotulo{font-size:1.4rem; font-weight:700; color:#1B5E75; margin-bottom:16px;}
+button{font-size:1.1rem; font-weight:700; padding:20px; border-radius:16px; border:none; width:100%; max-width:320px; margin:10px auto; display:block; cursor:pointer;}
+#btnGravar{background:#8E5FB0; color:#fff;}
+#btnGravar.gravando{background:#D64545;}
+#btnEnviar{background:#3FA76A; color:#fff;}
+#status{color:#8A97A0; font-size:.95rem; min-height:1.4em;}
+#transcricao{background:#EAF3F8; border-radius:12px; padding:12px; margin-top:14px; font-size:1rem; min-height:1.4em;}
+audio{width:100%; max-width:320px; margin-top:14px;}
+.aviso{background:#FDECEC; border:2px solid #D64545; color:#7A1F1F; padding:10px; border-radius:10px; font-size:.85rem; margin-top:14px;}
 </style>
 </head>
 <body>
 <h1>Vamos gravar sua resposta</h1>
 <div class="figura" id="figura"></div>
 <div class="rotulo" id="rotulo"></div>
-
-<button id="btnGravar">🎤 Toque para gravar</button>
+<button id="btnGravar">&#127908; Toque para gravar</button>
 <div id="status"></div>
 <div id="transcricao"></div>
-<audio id="player" controls class="oculto" style="display:none;"></audio>
+<audio id="player" controls style="display:none;"></audio>
 <button id="btnEnviar" style="display:none;">Enviar resposta</button>
 <div id="avisoSemSuporte" class="aviso" style="display:none;"></div>
 
@@ -58,6 +57,9 @@ var audioBlob = null;
 var transcritoFinal = "";
 var reconhecimento = null;
 var suportaReconhecimento = ("webkitSpeechRecognition" in window) || ("SpeechRecognition" in window);
+var reconhecimentoTeveErro = false; // NOVO: sinaliza falha técnica, distinta de "pronunciou errado"
+var reconhecimentoAtivo = false;
+var gravandoAtualmente = false;
 
 function normalizar(txt){
   return (txt || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]/g, "").trim();
@@ -80,25 +82,52 @@ function distanciaLevenshtein(a, b){
 function combina(transcrito, alvo){
   var t = normalizar(transcrito), a = normalizar(alvo);
   if(!a) return null;
+  if(!t) return null; // NOVO: transcrição vazia = "não sei dizer", não "errou"
   if(t.indexOf(a) !== -1) return true;
   var dist = distanciaLevenshtein(t, a);
   return dist <= Math.max(1, Math.floor(a.length * 0.3));
 }
 
-if(suportaReconhecimento){
+/* NOVO: cria o reconhecimento (mas não inicia ainda) e prepara reinício
+   automático caso ele pare sozinho por timeout do próprio navegador
+   enquanto a criança ainda está gravando -- isso era uma causa provável
+   de transcrição vazia em gravações um pouco mais longas. */
+function prepararReconhecimento(){
+  if(!suportaReconhecimento) return null;
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  reconhecimento = new SR();
-  reconhecimento.lang = "pt-BR";
-  reconhecimento.continuous = true;
-  reconhecimento.interimResults = true;
-  reconhecimento.onresult = function(ev){
+  var r = new SR();
+  r.lang = "pt-BR";
+  r.continuous = true;
+  r.interimResults = true;
+  r.onresult = function(ev){
     var texto = "";
     for(var i = 0; i < ev.results.length; i++){ texto += ev.results[i][0].transcript + " "; }
     transcritoFinal = texto.trim();
     document.getElementById("transcricao").textContent = "Ouvi: " + transcritoFinal;
   };
-  reconhecimento.onerror = function(){ /* silencioso: ainda temos o audio gravado */ };
-} else {
+  r.onerror = function(ev){
+    /* ANTES: ficava em silêncio total, e uma falha técnica virava "errou"
+       do mesmo jeito que uma pronúncia errada -- injusto. Agora, registra
+       a falha (pra não penalizar como errado) e tenta de novo sozinho se
+       ainda estiver gravando. */
+    reconhecimentoTeveErro = true;
+    if(ev && ev.error !== "aborted" && gravandoAtualmente){
+      try{ r.stop(); }catch(e){}
+    }
+  };
+  r.onend = function(){
+    reconhecimentoAtivo = false;
+    /* Alguns navegadores encerram o reconhecimento sozinhos depois de
+       alguns segundos, mesmo com continuous=true. Se a criança ainda
+       estiver gravando, reinicia automaticamente sem ela perceber. */
+    if(gravandoAtualmente){
+      try{ r.start(); reconhecimentoAtivo = true; }catch(e){ reconhecimentoTeveErro = true; }
+    }
+  };
+  return r;
+}
+
+if(!suportaReconhecimento){
   document.getElementById("avisoSemSuporte").style.display = "block";
   document.getElementById("avisoSemSuporte").textContent =
     "Este navegador não reconhece fala automaticamente, mas o áudio ainda será gravado e enviado para o adulto ouvir depois.";
@@ -106,13 +135,27 @@ if(suportaReconhecimento){
 
 var btnGravar = document.getElementById("btnGravar");
 var gravando = false;
-
 btnGravar.onclick = function(){
   if(!gravando){ iniciarGravacao(); } else { pararGravacao(); }
 };
 
 function iniciarGravacao(){
   document.getElementById("status").textContent = "Pedindo permissão do microfone...";
+  transcritoFinal = "";
+  reconhecimentoTeveErro = false;
+  document.getElementById("transcricao").textContent = "";
+  gravandoAtualmente = true;
+
+  /* NOVO: inicia o reconhecimento de fala já aqui, dentro do clique direto
+     do botão (não depois do getUserMedia resolver) -- em alguns
+     navegadores, iniciar o reconhecimento só depois de uma Promise
+     resolver perde o "gesto do usuário" exigido e falha silenciosamente. */
+  if(suportaReconhecimento){
+    reconhecimento = prepararReconhecimento();
+    try{ reconhecimento.start(); reconhecimentoAtivo = true; }
+    catch(e){ reconhecimentoTeveErro = true; }
+  }
+
   navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream){
     pedacos = [];
     gravador = new MediaRecorder(stream);
@@ -126,22 +169,26 @@ function iniciarGravacao(){
       stream.getTracks().forEach(function(t){ t.stop(); });
     };
     gravador.start();
-    if(reconhecimento){ transcritoFinal = ""; try{ reconhecimento.start(); }catch(e){} }
     gravando = true;
     btnGravar.classList.add("gravando");
     btnGravar.textContent = "⏹ Toque para parar";
     document.getElementById("status").textContent = "Gravando...";
   }).catch(function(erro){
+    gravandoAtualmente = false;
     document.getElementById("status").textContent = "Não foi possível acessar o microfone: " + erro.message;
   });
 }
+
 function pararGravacao(){
+  gravandoAtualmente = false; // precisa vir antes do stop() pro onend não reiniciar
   if(gravador && gravador.state !== "inactive"){ gravador.stop(); }
   if(reconhecimento){ try{ reconhecimento.stop(); }catch(e){} }
   gravando = false;
   btnGravar.classList.remove("gravando");
   btnGravar.textContent = "🎤 Gravar de novo";
-  document.getElementById("status").textContent = "Gravação pronta. Confira e envie.";
+  document.getElementById("status").textContent = reconhecimentoTeveErro
+    ? "Gravação pronta (o reconhecimento de fala teve uma falha técnica, mas o áudio está OK). Confira e envie."
+    : "Gravação pronta. Confira e envie.";
 }
 
 document.getElementById("btnEnviar").onclick = function(){
@@ -149,7 +196,13 @@ document.getElementById("btnEnviar").onclick = function(){
   var leitor = new FileReader();
   leitor.onloadend = function(){
     var base64 = leitor.result.split(",")[1];
-    var correspondeu = (tipoAtividade === "oral_palavra") ? combina(transcritoFinal, palavraAlvo) : null;
+    var correspondeu = null;
+    if(tipoAtividade === "oral_palavra"){
+      /* NOVO: se o reconhecimento teve erro técnico OU a transcrição ficou
+         vazia, não afirma que "errou" -- manda null (incerto), pro app
+         não penalizar uma falha técnica como se fosse pronúncia errada. */
+      correspondeu = reconhecimentoTeveErro ? null : combina(transcritoFinal, palavraAlvo);
+    }
     var payload = {
       origem: "gravador_missoes",
       taskId: taskId, child: childId, tipo: tipoAtividade,
@@ -166,7 +219,6 @@ document.getElementById("btnEnviar").onclick = function(){
   };
   leitor.readAsDataURL(audioBlob);
 };
-
 })();
 </script>
 </body>
